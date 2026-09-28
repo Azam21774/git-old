@@ -88,28 +88,20 @@ function getAccount(value) {
 
 /* =========================================================
    RANDOM REPOSITORY NAME
-   2-3 CAPITAL LETTERS + 3-4 DIGITS
+   8-12 LOWERCASE LETTERS AND DIGITS
 ========================================================= */
 
 function generateRepositoryName() {
-  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const letters = "abcdefghijklmnopqrstuvwxyz";
+  const characters = `${letters}0123456789`;
+  const length = Math.floor(Math.random() * 5) + 8;
+  let name =
+    letters[Math.floor(Math.random() * letters.length)];
 
-  const letterCount =
-    Math.floor(Math.random() * 2) + 2;
-
-  const digitCount =
-    Math.floor(Math.random() * 2) + 3;
-
-  let name = "";
-
-  for (let i = 0; i < letterCount; i++) {
-    name += letters[
-      Math.floor(Math.random() * letters.length)
+  for (let i = 1; i < length; i++) {
+    name += characters[
+      Math.floor(Math.random() * characters.length)
     ];
-  }
-
-  for (let i = 0; i < digitCount; i++) {
-    name += Math.floor(Math.random() * 10);
   }
 
   return name;
@@ -179,6 +171,25 @@ async function waitForResume() {
   while (state.running && state.paused) {
     await sleep(250);
   }
+}
+
+async function pauseAwareSleep(durationMs) {
+  let remainingMs = Math.max(0, Number(durationMs) || 0);
+
+  while (remainingMs > 0) {
+    await waitForResume();
+
+    if (!state.running) {
+      return false;
+    }
+
+    const sliceMs = Math.min(250, remainingMs);
+    await sleep(sliceMs);
+    remainingMs -= sliceMs;
+  }
+
+  await waitForResume();
+  return state.running;
 }
 
 async function waitForPageStable(
@@ -735,7 +746,12 @@ async function launchBrowser() {
         "--disable-background-mode",
         "--no-service-autorun",
         "--disable-save-password-bubble",
-        "--disable-features=PasswordLeakDetection"
+        "--disable-features=PasswordLeakDetection",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--disable-dev-shm-usage",
+        "--lang=en-US,en",
+        "--window-size=1280,800"
       ]
     });
   } catch (error) {
@@ -896,17 +912,24 @@ async function fillOTP(selector, otp) {
 
       await page.keyboard.press("Backspace");
 
-      await page.type(
-        selector,
-        otp,
-        {
-          delay: getTimingValue(
-            "OTP_TYPE_DELAY_MS",
-            120,
-            250
-          )
-        }
+      const baseDelayMs = getTimingValue(
+        "OTP_TYPE_DELAY_MS",
+        900,
+        2000
       );
+
+      for (const digit of String(otp)) {
+        await waitForResume();
+        await page.keyboard.type(digit);
+
+        const delayCompleted = await pauseAwareSleep(
+          baseDelayMs + Math.random() * 400
+        );
+
+        if (!delayCompleted) {
+          return;
+        }
+      }
 
       log("OTP filled");
 
@@ -1197,27 +1220,27 @@ async function login(account) {
 
   log("2FA/OTP field detected");
 
+  /*
+   * Match the Python workflow's one-second pause before OTP entry.
+   */
+  const otpStartDelayCompleted = await pauseAwareSleep(
+    getTimingValue(
+      "OTP_START_DELAY_MS",
+      1000,
+      5000
+    )
+  );
+
+  if (!otpStartDelayCompleted) {
+    return;
+  }
+
   const otp =
     generateOTP(
       account.totp
     );
 
   log("Current TOTP generated");
-
-  /*
-   * GitHub's OTP screen in the reference recording stays visible
-   * briefly before the code is entered. Keep that small pause separate
-   * from the normal action delay, then type the digits at human speed.
-   */
-  await waitForResume();
-  await sleep(
-    getTimingValue(
-      "OTP_START_DELAY_MS",
-      650,
-      5000
-    )
-  );
-  await waitForResume();
 
   /*
    * Don't verify OTP field after typing.
@@ -1228,6 +1251,10 @@ async function login(account) {
     otpSelector,
     otp
   );
+
+  if (!state.running) {
+    return;
+  }
 
   await actionPause();
   await submitOTP();
@@ -2251,6 +2278,10 @@ app.post(
         for (const job of allEmailPairs) {
           await waitForResume();
 
+          if (!state.running) {
+            break;
+          }
+
           log(
             `Starting recipient batch ${job.index + 1}/${totalBatches}`
           );
@@ -2270,14 +2301,14 @@ app.post(
         }
       }
 
-      state.status =
-        "finished";
+      if (state.running) {
+        state.status = "finished";
+        state.running = false;
 
-      state.running = false;
-
-      log(
-        "Automation completed successfully"
-      );
+        log(
+          "Automation completed successfully"
+        );
+      }
 
     } catch (error) {
       state.running = false;

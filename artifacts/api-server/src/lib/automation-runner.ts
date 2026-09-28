@@ -41,6 +41,34 @@ function isRunStopping(run: ActiveRun) {
   return run.state === "stopping";
 }
 
+async function waitForRunDelay(
+  run: ActiveRun,
+  durationMs: number,
+) {
+  let remainingMs = Math.max(0, durationMs);
+
+  while (remainingMs > 0) {
+    if (activeRun !== run || isRunStopping(run)) {
+      return false;
+    }
+
+    if (run.paused) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, 250),
+      );
+      continue;
+    }
+
+    const sliceMs = Math.min(250, remainingMs);
+    await new Promise((resolve) =>
+      setTimeout(resolve, sliceMs),
+    );
+    remainingMs -= sliceMs;
+  }
+
+  return activeRun === run && !isRunStopping(run);
+}
+
 export type RunnerHooks = {
   onLog: (
     message: string,
@@ -818,6 +846,11 @@ export async function startAutomation(
         phase === 1 ? "normal" : "warning",
       );
 
+      const launchIntervalMs =
+        availableAccounts.length > 5
+          ? 1000 + Math.random() * 500
+          : 500;
+
       const results = await Promise.all(
         availableAccounts.map(
           async ({ account, accountIndex }, assignmentIndex) => {
@@ -830,6 +863,38 @@ export async function startAutomation(
                 0,
               )} recipient(s).`,
             );
+
+            const launchDelayMs =
+              launchIntervalMs * assignmentIndex;
+
+            if (
+              launchDelayMs > 0 &&
+              !(await waitForRunDelay(run, launchDelayMs))
+            ) {
+              return {
+                account,
+                accountIndex,
+                jobs,
+                result: {
+                  ok: false,
+                  stopped: true,
+                  remainingJobs: jobs,
+                },
+              };
+            }
+
+            if (isRunStopping(run)) {
+              return {
+                account,
+                accountIndex,
+                jobs,
+                result: {
+                  ok: false,
+                  stopped: true,
+                  remainingJobs: jobs,
+                },
+              };
+            }
 
             try {
               const result = await runAccount(
