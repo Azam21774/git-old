@@ -31,7 +31,8 @@ type ActiveRun = {
   paused: boolean;
   children: Map<number, ChildProcess>;
   runnerPorts: Map<number, number>;
-  completedBatchIndexes: Set<number>;
+  completedRecipientIndexes: Set<number>;
+  completedRecipientsByAccount: Map<string, number>;
 };
 
 let nextActiveRunId = 1;
@@ -78,6 +79,7 @@ export type RunnerHooks = {
   onBatchComplete: (
     accountIndex: number,
     batchIndex: number,
+    recipientIndexes: number[],
   ) => Promise<void>;
 
   onAccount: (accountIndex: number) => Promise<void>;
@@ -91,7 +93,26 @@ export type RunnerHooks = {
 type RecipientBatch = {
   index: number;
   recipients: string[];
+  recipientIndexes: number[];
 };
+
+function isRecipientBatchComplete(
+  batch: RecipientBatch,
+  run: ActiveRun,
+) {
+  return batch.recipientIndexes.every((index) =>
+    run.completedRecipientIndexes.has(index),
+  );
+}
+
+function getRemainingRecipientBatches(
+  batches: RecipientBatch[],
+  run: ActiveRun,
+) {
+  return batches.filter(
+    (batch) => !isRecipientBatchComplete(batch, run),
+  );
+}
 
 type AccountAttemptResult = {
   ok: boolean;
@@ -306,10 +327,15 @@ async function postRunner(
 function createOutputFeeder(
   hooks: RunnerHooks,
   accountIndex: number,
+  accountId: number,
   run: ActiveRun,
+  jobs: RecipientBatch[],
 ) {
   let outputBuffer = "";
   let pending = Promise.resolve();
+  const jobsByIndex = new Map(
+    jobs.map((job) => [job.index, job]),
+  );
 
   const feed = (text: string) => {
     outputBuffer += text;
@@ -357,17 +383,34 @@ function createOutputFeeder(
 
         if (match) {
           const batchIndex = Number(match[1]) - 1;
+          const completedJob = jobsByIndex.get(batchIndex);
 
           if (
             Number.isInteger(batchIndex) &&
-            !run.completedBatchIndexes.has(batchIndex)
+            completedJob
           ) {
-            run.completedBatchIndexes.add(batchIndex);
-
-            await hooks.onBatchComplete(
-              accountIndex,
-              batchIndex,
+            const newlyCompleted = completedJob.recipientIndexes.filter(
+              (recipientIndex) =>
+                !run.completedRecipientIndexes.has(recipientIndex),
             );
+
+            if (newlyCompleted.length > 0) {
+              newlyCompleted.forEach((recipientIndex) =>
+                run.completedRecipientIndexes.add(recipientIndex),
+              );
+              const accountKey = String(accountId);
+              run.completedRecipientsByAccount.set(
+                accountKey,
+                (run.completedRecipientsByAccount.get(accountKey) ?? 0) +
+                  newlyCompleted.length,
+              );
+
+              await hooks.onBatchComplete(
+                accountIndex,
+                batchIndex,
+                newlyCompleted,
+              );
+            }
           }
         }
       });
@@ -382,6 +425,7 @@ function createOutputFeeder(
 
 async function runAccount(
   account: {
+    id: number;
     email: string;
     password: string;
     totp: string;
@@ -486,7 +530,9 @@ async function runAccount(
   const output = createOutputFeeder(
     hooks,
     accountIndex,
+    account.id,
     run,
+    jobs,
   );
 
   currentChild.stdout?.on(
@@ -657,9 +703,7 @@ async function runAccount(
     return {
       ok: false,
       stopped: true,
-      remainingJobs: jobs.filter(
-        (job) => !run.completedBatchIndexes.has(job.index),
-      ),
+      remainingJobs: getRemainingRecipientBatches(jobs, run),
     };
   }
 
@@ -667,9 +711,7 @@ async function runAccount(
     return {
       ok: false,
       stopped: false,
-      remainingJobs: jobs.filter(
-        (job) => !run.completedBatchIndexes.has(job.index),
-      ),
+      remainingJobs: getRemainingRecipientBatches(jobs, run),
       error: result.error,
     };
   }
@@ -678,9 +720,7 @@ async function runAccount(
     return {
       ok: false,
       stopped: false,
-      remainingJobs: jobs.filter(
-        (job) => !run.completedBatchIndexes.has(job.index),
-      ),
+      remainingJobs: getRemainingRecipientBatches(jobs, run),
       error:
         runnerError instanceof Error
           ? runnerError
@@ -695,9 +735,7 @@ async function runAccount(
     return {
       ok: false,
       stopped: false,
-      remainingJobs: jobs.filter(
-        (job) => !run.completedBatchIndexes.has(job.index),
-      ),
+      remainingJobs: getRemainingRecipientBatches(jobs, run),
       error: new Error(
         `Automation runner exited unexpectedly (code=${result.code}, signal=${result.signal}).`,
       ),
@@ -707,9 +745,7 @@ async function runAccount(
   return {
     ok: runnerOk,
     stopped: false,
-    remainingJobs: jobs.filter(
-      (job) => !run.completedBatchIndexes.has(job.index),
-    ),
+    remainingJobs: getRemainingRecipientBatches(jobs, run),
     error: runnerOk
       ? undefined
       : new Error("Automation runner did not finish successfully."),
@@ -732,7 +768,9 @@ export async function startAutomation(
   actionDelay: number,
   typingDelay: number,
   batchSize: 1 | 2,
-  resumeCompletedBatchIndexes: number[] = [],
+  accountRecipientLimit: number,
+  resumeCompletedRecipientIndexes: number[],
+  resumeCompletedRecipientsByAccount: Record<string, number>,
   hooks: RunnerHooks,
 ) {
   if (activeRun) {
@@ -769,29 +807,20 @@ export async function startAutomation(
   process.env.TYPE_DELAY_MS =
     String(typingDelay);
 
-  const batches: RecipientBatch[] = [];
-
-  for (
-    let index = 0;
-    index < normalizedRecipients.length;
-    index += batchSize
-  ) {
-    batches.push({
-      index: batches.length,
-      recipients: normalizedRecipients.slice(
-        index,
-        index + batchSize,
-      ),
-    });
-  }
-
-  const completedBatchIndexes = new Set(
-    resumeCompletedBatchIndexes.filter(
+  const completedRecipientIndexes = new Set(
+    resumeCompletedRecipientIndexes.filter(
       (index) =>
         Number.isInteger(index) &&
         index >= 0 &&
-        index < batches.length,
+        index < normalizedRecipients.length,
     ),
+  );
+  const completedRecipientsByAccount = new Map(
+    Object.entries(resumeCompletedRecipientsByAccount)
+      .filter(([, count]) => Number.isSafeInteger(count) && count >= 0),
+  );
+  const totalBatches = Math.ceil(
+    normalizedRecipients.length / batchSize,
   );
 
   const run: ActiveRun = {
@@ -800,68 +829,182 @@ export async function startAutomation(
     paused: false,
     children: new Map(),
     runnerPorts: new Map(),
-    completedBatchIndexes,
+    completedRecipientIndexes,
+    completedRecipientsByAccount,
   };
 
   activeRun = run;
 
   try {
-    let pendingJobs = batches.filter(
-      (batch) => !run.completedBatchIndexes.has(batch.index),
-    );
-    let availableAccounts = accounts.map(
-      (account, index) => ({
+    let pendingRecipientIndexes = normalizedRecipients
+      .map((_recipient, index) => index)
+      .filter((index) => !run.completedRecipientIndexes.has(index));
+    let availableAccounts = accounts
+      .map((account, index) => ({
         account,
         accountIndex: index + 1,
-      }),
-    );
+      }))
+      .filter(
+        ({ account }) =>
+          accountRecipientLimit === 0 ||
+          (run.completedRecipientsByAccount.get(
+            String(account.id),
+          ) ?? 0) < accountRecipientLimit,
+      );
     let phase = 1;
 
+    const completedRecipientCount =
+      run.completedRecipientIndexes.size;
+
     await hooks.onLog(
-      `Starting ${availableAccounts.length} Google Chrome window(s) for ${batches.length} recipient batch(es). ${run.completedBatchIndexes.size} batch(es) already completed.`,
+      `Starting ${availableAccounts.length} available GitHub account(s) for ${normalizedRecipients.length} recipient(s). ${completedRecipientCount} recipient(s) already completed.`,
       "success",
     );
 
     run.state = "running";
 
     while (
-      pendingJobs.length > 0 &&
+      pendingRecipientIndexes.length > 0 &&
       availableAccounts.length > 0 &&
       !isRunStopping(run)
     ) {
-      const assignments = availableAccounts.map(
-        () => [] as RecipientBatch[],
+      const assignments: RecipientBatch[][] =
+        availableAccounts.map(() => []);
+      const assignedRecipientCounts = availableAccounts.map(
+        () => 0,
       );
+      const assignedRecipientIndexes = new Set<number>();
+      let pendingOffset = 0;
+      let accountCursor = 0;
 
-      pendingJobs.forEach((job, jobIndex) => {
-        assignments[
-          jobIndex % availableAccounts.length
-        ].push(job);
-      });
+      while (pendingOffset < pendingRecipientIndexes.length) {
+        let accountPosition = -1;
+
+        for (
+          let attempt = 0;
+          attempt < availableAccounts.length;
+          attempt += 1
+        ) {
+          const candidatePosition =
+            (accountCursor + attempt) %
+            availableAccounts.length;
+          const candidate = availableAccounts[candidatePosition];
+          const alreadyAssigned =
+            assignedRecipientCounts[candidatePosition];
+          const completedForAccount =
+            run.completedRecipientsByAccount.get(
+              String(candidate.account.id),
+            ) ?? 0;
+
+          if (
+            accountRecipientLimit === 0 ||
+            completedForAccount + alreadyAssigned <
+              accountRecipientLimit
+          ) {
+            accountPosition = candidatePosition;
+            break;
+          }
+        }
+
+        if (accountPosition < 0) break;
+
+        const account = availableAccounts[accountPosition];
+        const alreadyAssigned =
+          assignedRecipientCounts[accountPosition];
+        const completedForAccount =
+          run.completedRecipientsByAccount.get(
+            String(account.account.id),
+          ) ?? 0;
+        const remainingCapacity =
+          accountRecipientLimit === 0
+            ? batchSize
+            : accountRecipientLimit -
+              completedForAccount -
+              alreadyAssigned;
+        const firstRecipientIndex =
+          pendingRecipientIndexes[pendingOffset];
+        const originalBatchIndex = Math.floor(
+          firstRecipientIndex / batchSize,
+        );
+        const recipientIndexes: number[] = [];
+
+        while (
+          pendingOffset + recipientIndexes.length <
+            pendingRecipientIndexes.length &&
+          recipientIndexes.length < batchSize &&
+          recipientIndexes.length < remainingCapacity
+        ) {
+          const nextRecipientIndex =
+            pendingRecipientIndexes[
+              pendingOffset + recipientIndexes.length
+            ];
+
+          if (
+            nextRecipientIndex !==
+              firstRecipientIndex + recipientIndexes.length ||
+            Math.floor(nextRecipientIndex / batchSize) !==
+              originalBatchIndex
+          ) {
+            break;
+          }
+
+          recipientIndexes.push(nextRecipientIndex);
+        }
+
+        if (recipientIndexes.length === 0) break;
+
+        assignments[accountPosition].push({
+          index: assignments[accountPosition].length,
+          recipientIndexes,
+          recipients: recipientIndexes.map(
+            (index) => normalizedRecipients[index],
+          ),
+        });
+        recipientIndexes.forEach((index) =>
+          assignedRecipientIndexes.add(index),
+        );
+        assignedRecipientCounts[accountPosition] +=
+          recipientIndexes.length;
+        pendingOffset += recipientIndexes.length;
+        accountCursor =
+          (accountPosition + 1) % availableAccounts.length;
+      }
+
+      const assignedAccounts = availableAccounts
+        .map((entry, index) => ({
+          ...entry,
+          jobs: assignments[index],
+        }))
+        .filter((entry) => entry.jobs.length > 0);
 
       await hooks.onLog(
         phase === 1
-          ? `Assigning ${pendingJobs.length} remaining batch(es) across ${availableAccounts.length} account(s).`
-          : `Reassigning ${pendingJobs.length} unfinished batch(es) to ${availableAccounts.length} surviving account(s).`,
+          ? `Assigning ${assignedRecipientIndexes.size} recipient(s) across ${assignedAccounts.length} account(s).`
+          : `Reassigning unfinished recipients across ${assignedAccounts.length} available account(s).`,
         phase === 1 ? "normal" : "warning",
       );
 
       const launchIntervalMs =
-        availableAccounts.length > 5
+        assignedAccounts.length > 5
           ? 1000 + Math.random() * 500
           : 500;
 
       const results = await Promise.all(
-        availableAccounts.map(
-          async ({ account, accountIndex }, assignmentIndex) => {
-            const jobs = assignments[assignmentIndex];
-
+        assignedAccounts.map(
+          async (
+            { account, accountIndex, jobs },
+            assignmentIndex,
+          ) => {
             await hooks.onLog(
               `Account ${accountIndex} assigned ${jobs.length} batch(es) containing ${jobs.reduce(
                 (count, job) =>
                   count + job.recipients.length,
                 0,
-              )} recipient(s).`,
+              )} recipient(s)${
+                accountRecipientLimit > 0
+                  ? ` (limit ${accountRecipientLimit})`
+                  : ""
+              }.`,
             );
 
             const launchDelayMs =
@@ -902,7 +1045,7 @@ export async function startAutomation(
                 jobs,
                 workflow,
                 batchSize,
-                batches.length,
+                jobs.length,
                 accountIndex,
                 hooks,
                 run,
@@ -922,11 +1065,9 @@ export async function startAutomation(
                 result: {
                   ok: false,
                   stopped: false,
-                  remainingJobs: jobs.filter(
-                    (job) =>
-                      !run.completedBatchIndexes.has(
-                        job.index,
-                      ),
+                  remainingJobs: getRemainingRecipientBatches(
+                    jobs,
+                    run,
                   ),
                   error:
                     error instanceof Error
@@ -939,7 +1080,11 @@ export async function startAutomation(
         ),
       );
 
-      const nextPendingJobs: RecipientBatch[] = [];
+      const nextPendingRecipientIndexes = new Set(
+        pendingRecipientIndexes.filter(
+          (index) => !assignedRecipientIndexes.has(index),
+        ),
+      );
       const nextAvailableAccounts: typeof availableAccounts = [];
 
       for (const {
@@ -951,28 +1096,52 @@ export async function startAutomation(
           continue;
         }
 
-        const remainingJobs = result.remainingJobs.filter(
-          (job) =>
-            !run.completedBatchIndexes.has(job.index),
+        const remainingJobs = getRemainingRecipientBatches(
+          result.remainingJobs,
+          run,
         );
 
         if (result.ok) {
-          nextAvailableAccounts.push({
-            account,
-            accountIndex,
-          });
+          remainingJobs.forEach((job) =>
+            job.recipientIndexes.forEach((recipientIndex) =>
+              nextPendingRecipientIndexes.add(recipientIndex),
+            ),
+          );
 
-          if (remainingJobs.length > 0) {
-            nextPendingJobs.push(...remainingJobs);
+          const completedForAccount =
+            run.completedRecipientsByAccount.get(
+              String(account.id),
+            ) ?? 0;
+
+          if (
+            accountRecipientLimit > 0 &&
+            completedForAccount >= accountRecipientLimit
+          ) {
+            await hooks.onLog(
+              `Account ${accountIndex} reached its ${accountRecipientLimit}-recipient limit and is now off for this run.`,
+              "success",
+            );
+          } else {
+            nextAvailableAccounts.push({
+              account,
+              accountIndex,
+            });
           }
 
           continue;
         }
 
-        nextPendingJobs.push(...remainingJobs);
+        remainingJobs.forEach((job) =>
+          job.recipientIndexes.forEach((recipientIndex) =>
+            nextPendingRecipientIndexes.add(recipientIndex),
+          ),
+        );
 
         await hooks.onLog(
-          `Account ${accountIndex} failed; ${remainingJobs.length} unfinished batch(es) will be shifted to surviving account(s).${
+          `Account ${accountIndex} failed; ${remainingJobs.reduce(
+            (count, job) => count + job.recipientIndexes.length,
+            0,
+          )} unfinished recipient(s) will be shifted to surviving account(s).${
             result.error
               ? ` Reason: ${result.error.message}`
               : ""
@@ -981,43 +1150,49 @@ export async function startAutomation(
         );
       }
 
-      const uniquePending = new Map<
-        number,
-        RecipientBatch
-      >();
-
-      for (const job of nextPendingJobs) {
-        if (!run.completedBatchIndexes.has(job.index)) {
-          uniquePending.set(job.index, job);
-        }
-      }
-
-      pendingJobs = Array.from(uniquePending.values()).sort(
-        (left, right) => left.index - right.index,
-      );
+      pendingRecipientIndexes = Array.from(
+        nextPendingRecipientIndexes,
+      )
+        .filter((index) => !run.completedRecipientIndexes.has(index))
+        .sort((left, right) => left - right);
       availableAccounts = nextAvailableAccounts;
       phase += 1;
 
       if (
-        pendingJobs.length > 0 &&
+        pendingRecipientIndexes.length > 0 &&
         availableAccounts.length === 0
       ) {
-        throw new Error(
-          `No healthy account remains for ${pendingJobs.length} unfinished batch(es).`,
-        );
+        break;
       }
     }
 
     if (!isRunStopping(run)) {
-      if (pendingJobs.length > 0) {
+      if (pendingRecipientIndexes.length > 0) {
+        const everyAccountAtLimit =
+          accountRecipientLimit > 0 &&
+          accounts.every(
+            (account) =>
+              (run.completedRecipientsByAccount.get(
+                String(account.id),
+              ) ?? 0) >= accountRecipientLimit,
+          );
+
+        if (everyAccountAtLimit) {
+          await hooks.onFinished(
+            false,
+            `All GitHub accounts reached the ${accountRecipientLimit}-recipient limit. ${pendingRecipientIndexes.length} recipient(s) remain; increase the limit or add accounts to continue.`,
+          );
+          return;
+        }
+
         throw new Error(
-          `${pendingJobs.length} recipient batch(es) could not be completed.`,
+          `No healthy account remains for ${pendingRecipientIndexes.length} unfinished recipient(s).`,
         );
       }
 
       await hooks.onFinished(
         true,
-        "All recipient batches completed, including automatic failover batches.",
+        "All recipients were processed successfully, including automatic failover.",
       );
     }
   } catch (error) {

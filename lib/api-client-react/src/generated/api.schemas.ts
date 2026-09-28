@@ -46,6 +46,7 @@ export interface AutomationSettingsRequest {
      */
   typingDelay: number;
   batchSize: AutomationSettingsRequestBatchSize;
+  accountRecipientLimit: number;
 }
 
 export interface AutomationAccount {
@@ -68,6 +69,7 @@ export interface AutomationSettings {
   actionDelay: number;
   typingDelay: number;
   batchSize: AutomationSettingsBatchSize;
+  accountRecipientLimit: number;
 }
 
 export type AutomationRunStatus = typeof AutomationRunStatus[keyof typeof AutomationRunStatus];
@@ -87,6 +89,9 @@ export interface AutomationRun {
   total: number;
   completed: number;
   currentAccount: number | null;
+  totalRecipients: number;
+  completedRecipients: number;
+  completedRecipientsByAccount: Record<string, number>;
 }
 
 export type AutomationLogTone = typeof AutomationLogTone[keyof typeof AutomationLogTone];

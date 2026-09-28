@@ -41,9 +41,11 @@ function getState() {
           status: memory.run.status,
           total: memory.run.total,
           completed: memory.run.completed,
+          totalRecipients: memory.run.totalRecipients,
+          completedRecipients: memory.run.completedRecipients,
           currentAccount: memory.run.currentAccount,
-          completedByAccount: {
-            ...memory.run.completedByAccount,
+          completedRecipientsByAccount: {
+            ...memory.run.completedRecipientsByAccount,
           },
           completedBatches: [
             ...memory.run.completedBatches,
@@ -66,6 +68,33 @@ function createResumeKey(recipients: string[], batchSize: number) {
 
 function createAccountKey(accounts: { id: number }[]) {
   return JSON.stringify(accounts.map((account) => account.id));
+}
+
+function getCompletedBatchIndexes(
+  completedRecipientIndexes: number[],
+  totalRecipients: number,
+  batchSize: number,
+) {
+  const completedSet = new Set(completedRecipientIndexes);
+  const totalBatches = Math.ceil(totalRecipients / batchSize);
+  const completedBatches: number[] = [];
+
+  for (let batchIndex = 0; batchIndex < totalBatches; batchIndex += 1) {
+    const start = batchIndex * batchSize;
+    const end = Math.min(totalRecipients, start + batchSize);
+    let batchComplete = true;
+
+    for (let recipientIndex = start; recipientIndex < end; recipientIndex += 1) {
+      if (!completedSet.has(recipientIndex)) {
+        batchComplete = false;
+        break;
+      }
+    }
+
+    if (batchComplete) completedBatches.push(batchIndex);
+  }
+
+  return completedBatches;
 }
 
 async function addLog(
@@ -270,6 +299,52 @@ router.post("/automation/recipients/chunk", async (req, res, next) => {
 router.put("/automation/settings", async (req, res, next) => {
   try {
     const body = req.body ?? {};
+    const batchSize =
+      body.batchSize === undefined
+        ? undefined
+        : Number(body.batchSize) === 1
+          ? 1
+          : 2;
+    const accountRecipientLimit =
+      body.accountRecipientLimit === undefined
+        ? undefined
+        : Number(body.accountRecipientLimit);
+
+    if (
+      batchSize !== undefined &&
+      isAutomationActive() &&
+      batchSize !== memory.settings.batchSize
+    ) {
+      return jsonError(
+        res,
+        409,
+        "Stop the active automation before changing the batch size.",
+      );
+    }
+
+    if (
+      accountRecipientLimit !== undefined &&
+      (!Number.isSafeInteger(accountRecipientLimit) ||
+        accountRecipientLimit < 0)
+    ) {
+      return jsonError(
+        res,
+        400,
+        "Per-account recipient limit must be a whole number of 0 or more.",
+      );
+    }
+
+    if (
+      accountRecipientLimit !== undefined &&
+      isAutomationActive() &&
+      accountRecipientLimit !== memory.settings.accountRecipientLimit
+    ) {
+      return jsonError(
+        res,
+        409,
+        "Stop the active automation before changing the per-account recipient limit.",
+      );
+    }
 
     if (typeof body.fileName === "string") {
       memory.settings.fileName = body.fileName;
@@ -297,9 +372,12 @@ router.put("/automation/settings", async (req, res, next) => {
       );
     }
 
-    if (body.batchSize !== undefined) {
-      memory.settings.batchSize =
-        Number(body.batchSize) === 1 ? 1 : 2;
+    if (batchSize !== undefined) {
+      memory.settings.batchSize = batchSize;
+    }
+
+    if (accountRecipientLimit !== undefined) {
+      memory.settings.accountRecipientLimit = accountRecipientLimit;
     }
 
     await addLog("Automation settings updated.");
@@ -359,13 +437,23 @@ router.post("/automation/run/start", async (_req, res, next) => {
       previousRun.resumeKey === resumeKey;
     const sameAccounts =
       canResume && previousRun.accountKey === accountKey;
-    const completedByAccount = sameAccounts
-      ? { ...previousRun.completedByAccount }
+    const completedRecipientsByAccount = canResume
+      ? { ...previousRun.completedRecipientsByAccount }
       : {};
-    const completedBatches = canResume
-      ? [...previousRun.completedBatches]
+    const completedRecipientIndexes = canResume
+      ? [...previousRun.completedRecipientIndexes]
       : [];
+    const completedRecipientIndexSet = new Set(
+      completedRecipientIndexes,
+    );
+    const completedBatches = getCompletedBatchIndexes(
+      completedRecipientIndexes,
+      memory.recipients.length,
+      memory.settings.batchSize,
+    );
+    const completedBatchSet = new Set(completedBatches);
     const completed = completedBatches.length;
+    const totalRecipients = memory.recipients.length;
 
     memory.run = {
       id: runId,
@@ -375,10 +463,13 @@ router.post("/automation/run/start", async (_req, res, next) => {
           memory.settings.batchSize,
       ),
       completed,
+      totalRecipients,
+      completedRecipients: completedRecipientIndexes.length,
       currentAccount: sameAccounts
         ? previousRun.currentAccount
         : 1,
-      completedByAccount,
+      completedRecipientIndexes,
+      completedRecipientsByAccount,
       completedBatches,
       resumeKey,
       accountKey,
@@ -414,7 +505,9 @@ router.post("/automation/run/start", async (_req, res, next) => {
       memory.settings.actionDelay,
       memory.settings.typingDelay,
       memory.settings.batchSize,
-      completedBatches,
+      memory.settings.accountRecipientLimit,
+      completedRecipientIndexes,
+      completedRecipientsByAccount,
       {
         onLog: async (message, tone = "normal") => {
           if (memory.run?.id !== runId) return;
@@ -428,28 +521,67 @@ router.post("/automation/run/start", async (_req, res, next) => {
 
         onBatchComplete: async (
           accountIndex,
-          batchIndex,
+          _batchIndex,
+          recipientIndexes,
         ) => {
           if (memory.run?.id !== runId) return;
+          const accountId = accounts[accountIndex - 1]?.id;
+          if (accountId === undefined) return;
 
-          completedByAccount[
-            String(accountIndex)
-          ] =
-            (completedByAccount[
-              String(accountIndex)
-            ] ?? 0) + 1;
+          const newlyCompleted = recipientIndexes.filter(
+            (recipientIndex) =>
+              !completedRecipientIndexSet.has(recipientIndex),
+          );
 
-          if (
-            !completedBatches.includes(batchIndex)
-          ) {
-            completedBatches.push(batchIndex);
+          if (newlyCompleted.length === 0) return;
+
+          newlyCompleted.forEach((recipientIndex) => {
+            completedRecipientIndexSet.add(recipientIndex);
+            completedRecipientIndexes.push(recipientIndex);
+          });
+
+          for (const recipientIndex of newlyCompleted) {
+            const batchIndex = Math.floor(
+              recipientIndex / memory.settings.batchSize,
+            );
+            const batchStart =
+              batchIndex * memory.settings.batchSize;
+            const batchEnd = Math.min(
+              memory.run.totalRecipients,
+              batchStart + memory.settings.batchSize,
+            );
+            let batchComplete = true;
+
+            for (
+              let index = batchStart;
+              index < batchEnd;
+              index += 1
+            ) {
+              if (!completedRecipientIndexSet.has(index)) {
+                batchComplete = false;
+                break;
+              }
+            }
+
+            if (batchComplete) completedBatchSet.add(batchIndex);
           }
 
-          memory.run.completed =
-            completedBatches.length;
-          memory.run.completedBatches = [
-            ...completedBatches,
+          completedRecipientsByAccount[String(accountId)] =
+            (completedRecipientsByAccount[String(accountId)] ?? 0) +
+            newlyCompleted.length;
+
+          memory.run.completedRecipientIndexes = [
+            ...new Set(completedRecipientIndexes),
           ].sort((left, right) => left - right);
+          memory.run.completedRecipients =
+            memory.run.completedRecipientIndexes.length;
+          memory.run.completedBatches = Array.from(
+            completedBatchSet,
+          ).sort((left, right) => left - right);
+          memory.run.completed = memory.run.completedBatches.length;
+          memory.run.completedRecipientsByAccount = {
+            ...completedRecipientsByAccount,
+          };
           memory.run.currentAccount = accountIndex;
           memory.run.updatedAt = new Date().toISOString();
         },
@@ -475,6 +607,8 @@ router.post("/automation/run/start", async (_req, res, next) => {
           if (ok) {
             memory.run.completed =
               memory.run.total;
+            memory.run.completedRecipients =
+              memory.run.totalRecipients;
           }
 
           memory.run.updatedAt = new Date().toISOString();
@@ -568,8 +702,10 @@ router.post("/automation/run/reset", async (_req, res, next) => {
     if (memory.run) {
       memory.run.status = "ready";
       memory.run.completed = 0;
+      memory.run.completedRecipients = 0;
       memory.run.currentAccount = 1;
-      memory.run.completedByAccount = {};
+      memory.run.completedRecipientIndexes = [];
+      memory.run.completedRecipientsByAccount = {};
       memory.run.completedBatches = [];
       memory.run.updatedAt = new Date().toISOString();
     }

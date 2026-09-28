@@ -12,6 +12,7 @@ export type MemorySettings = {
   actionDelay: number;
   typingDelay: number;
   batchSize: 1 | 2;
+  accountRecipientLimit: number;
 };
 
 export type MemoryRun = {
@@ -19,8 +20,11 @@ export type MemoryRun = {
   status: "ready" | "running" | "paused" | "complete" | "stopped";
   total: number;
   completed: number;
+  totalRecipients: number;
+  completedRecipients: number;
   currentAccount: number;
-  completedByAccount: Record<string, number>;
+  completedRecipientIndexes: number[];
+  completedRecipientsByAccount: Record<string, number>;
   completedBatches: number[];
   resumeKey: string;
   accountKey: string;
@@ -52,6 +56,7 @@ export const memory: {
     actionDelay: 700,
     typingDelay: 35,
     batchSize: 2,
+    accountRecipientLimit: 0,
   },
 
   run: null,

@@ -78,6 +78,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .account-row.active { background: rgba(128,87,239,.12); color: #f0eefb; }
 .account-index { min-width: 18px; color: #626582; font-size: 9px; }
 .active-label { margin-left: auto; color: var(--violet-2); font-size: 8px; letter-spacing: .08em; }
+.account-usage { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.limit-label { margin-left: auto; color: #e3ad61; font-size: 8px; letter-spacing: .06em; white-space: nowrap; }
+.setting-hint { color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: 0; text-transform: none; }
 .check-mark { color: var(--cyan); }
 .empty-state { padding: 12px 0; color: #626582; font: 11px "DM Mono", monospace; }
 .card-actions, .recipient-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -97,7 +100,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .range-label { display: flex; justify-content: space-between; margin-bottom: 9px; color: #c9c8dd; font-size: 12px; }
 .range-label output { color: var(--violet-2); font: 11px "DM Mono", monospace; }
 input[type="range"] { width: 100%; accent-color: var(--violet); cursor: pointer; }
-.summary-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin: 5px 0 23px; }
+.summary-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 12px; margin: 5px 0 23px; }
 .summary-box { min-height: 82px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #101222; display: grid; align-content: space-between; }
 .summary-box span { color: var(--muted); font: 10px "DM Mono", monospace; letter-spacing: .08em; }
 .summary-box strong { color: #f0eefb; font-size: 25px; letter-spacing: -.05em; }
