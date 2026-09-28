@@ -1,0 +1,243 @@
+const { app, BrowserWindow } = require("electron");
+const path = require("path");
+const { spawn } = require("child_process");
+const http = require("http");
+
+const ROOT = path.resolve(__dirname, "../../..");
+
+const API_PORT = 8080;
+const WEB_PORT = 5173;
+
+let apiProcess = null;
+let viteProcess = null;
+let mainWindow = null;
+let shuttingDown = false;
+
+function waitForServer(url, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+
+    const retry = () => {
+      if (Date.now() - started > timeout) {
+        reject(new Error(`Server did not start: ${url}`));
+        return;
+      }
+
+      setTimeout(check, 300);
+    };
+
+    const check = () => {
+      const req = http.get(url, (res) => {
+        res.resume();
+
+        if (res.statusCode >= 200 && res.statusCode < 500) {
+          resolve();
+          return;
+        }
+
+        retry();
+      });
+
+      req.on("error", retry);
+
+      req.setTimeout(1000, () => {
+        req.destroy();
+        retry();
+      });
+    };
+
+    check();
+  });
+}
+
+function startApi() {
+  console.log("Starting API server...");
+
+  const apiDir = path.join(ROOT, "artifacts/api-server");
+
+  apiProcess = spawn(
+    "pnpm",
+    ["run", "dev"],
+    {
+      cwd: apiDir,
+      env: {
+        ...process.env,
+        NODE_ENV: "development",
+        PORT: String(API_PORT),
+      },
+      stdio: "inherit",
+      shell: false,
+    }
+  );
+
+  apiProcess.on("error", (err) => {
+    console.error("API process error:", err);
+  });
+
+  apiProcess.on("exit", (code, signal) => {
+    if (!shuttingDown) {
+      console.log(
+        `API server exited: code=${code}, signal=${signal}`
+      );
+    }
+  });
+}
+
+function startVite() {
+  console.log("Starting dashboard...");
+
+  const dashboardDir = path.join(
+    ROOT,
+    "artifacts/github-automation-dashboard"
+  );
+
+  const viteBin = path.join(
+    dashboardDir,
+    "node_modules",
+    "vite",
+    "bin",
+    "vite.js"
+  );
+
+  /*
+   * IMPORTANT:
+   * Do NOT use process.execPath here.
+   *
+   * process.execPath inside Electron = Electron binary.
+   * Using it launches another Electron process.
+   *
+   * Use Node to run Vite instead.
+   */
+  viteProcess = spawn(
+    "node",
+    [
+      viteBin,
+      "--config",
+      "vite.config.ts",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      String(WEB_PORT),
+    ],
+    {
+      cwd: dashboardDir,
+      env: {
+        ...process.env,
+        WEB_PORT: String(WEB_PORT),
+        API_URL: `http://localhost:${API_PORT}`,
+      },
+      stdio: "inherit",
+      shell: false,
+    }
+  );
+
+  viteProcess.on("error", (err) => {
+    console.error("Vite process error:", err);
+  });
+
+  viteProcess.on("exit", (code, signal) => {
+    if (!shuttingDown) {
+      console.log(
+        `Dashboard exited: code=${code}, signal=${signal}`
+      );
+    }
+  });
+}
+
+async function createWindow() {
+  if (mainWindow) {
+    mainWindow.focus();
+    return;
+  }
+
+  startApi();
+
+  console.log("Waiting for API...");
+  await waitForServer(`http://127.0.0.1:${API_PORT}/`);
+
+  startVite();
+
+  console.log("Waiting for dashboard...");
+  await waitForServer(`http://127.0.0.1:${WEB_PORT}/`);
+
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 1000,
+    minHeight: 700,
+    title: "GitHub Automation Dashboard",
+
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+
+  await mainWindow.loadURL(
+    `http://localhost:${WEB_PORT}`
+  );
+}
+
+function killProcess(child) {
+  if (!child) return;
+
+  try {
+    if (!child.killed) {
+      child.kill("SIGTERM");
+    }
+  } catch (error) {
+    console.error("Failed to stop child process:", error);
+  }
+}
+
+function shutdown() {
+  if (shuttingDown) return;
+
+  shuttingDown = true;
+
+  console.log("Stopping application...");
+
+  killProcess(viteProcess);
+  killProcess(apiProcess);
+
+  viteProcess = null;
+  apiProcess = null;
+}
+
+app.whenReady().then(async () => {
+  try {
+    await createWindow();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow().catch((error) => {
+          console.error("Failed to recreate window:", error);
+        });
+      } else if (mainWindow) {
+        mainWindow.focus();
+      }
+    });
+  } catch (error) {
+    console.error("Failed to start application:", error);
+
+    shutdown();
+
+    app.quit();
+  }
+});
+
+app.on("before-quit", () => {
+  shutdown();
+});
+
+app.on("window-all-closed", () => {
+  shutdown();
+
+  if (process.platform !== "darwin") {
+    app.quit();
+  }
+});

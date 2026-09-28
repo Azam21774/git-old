@@ -1,0 +1,344 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: automation
+    description: GitHub automation dashboard operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /automation/state:
+    get:
+      operationId: getAutomationState
+      tags: [automation]
+      summary: Get the persisted automation dashboard state
+      responses:
+        "200":
+          description: Current accounts, recipients, settings, run, and logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/accounts:
+    post:
+      operationId: addAutomationAccounts
+      tags: [automation]
+      summary: Add account records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationAccountsRequest"
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+    put:
+      operationId: replaceAutomationAccounts
+      tags: [automation]
+      summary: Replace all account records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationAccountsRequest"
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+    delete:
+      operationId: clearAutomationAccounts
+      tags: [automation]
+      summary: Clear all account records
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/recipients:
+    put:
+      operationId: replaceAutomationRecipients
+      tags: [automation]
+      summary: Replace all recipient emails
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationRecipientsRequest"
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/settings:
+    put:
+      operationId: updateAutomationSettings
+      tags: [automation]
+      summary: Save commit and speed settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AutomationSettingsRequest"
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/run/start:
+    post:
+      operationId: startAutomationRun
+      tags: [automation]
+      summary: Start a new automation run
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+        "400":
+          description: Missing accounts or recipients
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /automation/run/pause:
+    post:
+      operationId: pauseAutomationRun
+      tags: [automation]
+      summary: Pause the current automation run
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/run/resume:
+    post:
+      operationId: resumeAutomationRun
+      tags: [automation]
+      summary: Resume the current automation run
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/run/stop:
+    post:
+      operationId: stopAutomationRun
+      tags: [automation]
+      summary: Stop the current automation run
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/run/reset:
+    post:
+      operationId: resetAutomationRun
+      tags: [automation]
+      summary: Add a reset event to the automation log
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+  /automation/logs:
+    delete:
+      operationId: clearAutomationLogs
+      tags: [automation]
+      summary: Clear automation logs
+      responses:
+        "200":
+          description: Updated automation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomationState"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    AccountRecord:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        totp:
+          type: string
+      required: [email, password, totp]
+    AutomationAccountsRequest:
+      type: object
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountRecord"
+      required: [records]
+    AutomationRecipientsRequest:
+      type: object
+      properties:
+        emails:
+          type: array
+          items:
+            type: string
+            format: email
+      required: [emails]
+    AutomationSettingsRequest:
+      type: object
+      properties:
+        fileName:
+          type: string
+        subject:
+          type: string
+        message:
+          type: string
+        actionDelay:
+          type: integer
+          minimum: 0
+          maximum: 2000
+        typingDelay:
+          type: integer
+          minimum: 0
+          maximum: 250
+        batchSize:
+          type: integer
+          enum: [1, 2]
+      required: [fileName, subject, message, actionDelay, typingDelay, batchSize]
+    AutomationAccount:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+          format: email
+      required: [id, email]
+    AutomationSettings:
+      type: object
+      properties:
+        fileName:
+          type: string
+        subject:
+          type: string
+        message:
+          type: string
+        actionDelay:
+          type: integer
+        typingDelay:
+          type: integer
+        batchSize:
+          type: integer
+          enum: [1, 2]
+      required: [fileName, subject, message, actionDelay, typingDelay, batchSize]
+    AutomationRun:
+      type: object
+      properties:
+        id:
+          type: integer
+        status:
+          type: string
+          enum: [ready, running, paused, complete, stopped]
+        total:
+          type: integer
+        completed:
+          type: integer
+        currentAccount:
+          type: integer
+          nullable: true
+      required: [id, status, total, completed, currentAccount]
+    AutomationLog:
+      type: object
+      properties:
+        id:
+          type: integer
+        time:
+          type: string
+          format: date-time
+        message:
+          type: string
+        tone:
+          type: string
+          enum: [normal, success, warning]
+      required: [id, time, message, tone]
+    AutomationState:
+      type: object
+      properties:
+        accounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationAccount"
+        recipients:
+          type: array
+          items:
+            type: string
+            format: email
+        settings:
+          $ref: "#/components/schemas/AutomationSettings"
+        run:
+          allOf:
+            - $ref: "#/components/schemas/AutomationRun"
+          nullable: true
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomationLog"
+      required: [accounts, recipients, settings, run, logs]
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+      required: [message]
+

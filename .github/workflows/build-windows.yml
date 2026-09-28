@@ -1,0 +1,81 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build signed Windows installer when certificate is configured
+        working-directory: artifacts/github-automation-dashboard
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CODE_SIGNING_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_PASSWORD }}
+        run: pnpm dist:win
+
+      - name: Verify packaged automation runner
+        shell: pwsh
+        run: |
+          $runnerPath = "artifacts/github-automation-dashboard/release/win-unpacked/resources/backend/runner/github-ui-automation.cjs"
+          if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
+            throw "Packaged automation runner is missing: $runnerPath"
+          }
+          Write-Host "Verified packaged automation runner: $runnerPath"
+
+      - name: Publish installer and portable EXE to GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_tag="windows-latest"
+          mapfile -t exe_paths < <(find artifacts/github-automation-dashboard/release \
+            -maxdepth 1 \
+            -type f \
+            -iname '*.exe' \
+            -print)
+
+          if [ "${#exe_paths[@]}" -lt 2 ]; then
+            echo "Expected both installer and portable Windows EXEs."
+            printf 'Found: %s\n' "${exe_paths[@]}"
+            exit 1
+          fi
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            for exe_path in "${exe_paths[@]}"; do
+              gh release upload "$release_tag" "$exe_path" \
+                --clobber \
+                --repo "$GITHUB_REPOSITORY"
+            done
+          else
+            gh release create "$release_tag" \
+              "${exe_paths[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "Latest Windows build" \
+              --notes "Latest Windows installer and portable EXE built from main." \
+              --repo "$GITHUB_REPOSITORY"
+          fi
